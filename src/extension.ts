@@ -419,74 +419,16 @@ class SkillsProvider implements vscode.TreeDataProvider<SkillsTreeItem> {
         children.length > 0 ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed
       );
 
-    const projDisabled = [...projAgents, ...projSkills].filter(s => s.isDisabled).length;
-    const globDisabled = [...globAgents, ...globSkills].filter(s => s.isDisabled).length;
-
-    const projLabel = `Project (${projAgents.length + projSkills.length})${projDisabled ? ` — ${projDisabled} off` : ''}`;
-    const globLabel = `Global (${globAgents.length + globSkills.length})${globDisabled ? ` — ${globDisabled} off` : ''}`;
-
-    const projRoot = makeSection(
-      projLabel,
-      [
-        makeSection(
-          `Agents (${projAgents.length})`,
-          toItems(projAgents),
-          `.claude/agents/`,
-          `**Project agents** — defined in \`.claude/agents/\` inside this workspace.\n\nClaude delegates tasks to these when you ask it to code, review, or research. Each is a \`.md\` file with a name, description, and instructions.`
-        ),
-        makeSection(
-          `Skills (${projSkills.length})`,
-          toItems(projSkills),
-          `.claude/skills/`,
-          `**Project skills** — defined in \`.claude/skills/\` inside this workspace.\n\nSkills are slash commands and prompt snippets loaded with the Skill tool (e.g. \`/code-review\`, \`/dataviz\`). Each lives in its own subfolder with a \`SKILL.md\` file.`
-        ),
-        makeSection(
-          'Config Files',
-          toConfigItems(projConfigFiles),
-          'CLAUDE.md · settings.json',
-          `**Project config files**\n\n- \`CLAUDE.md\` — instructions Claude reads at the start of every session in this project\n- \`settings.json\` — project-level permissions, hooks, and env vars\n- \`settings.local.json\` — your personal overrides (not committed to git)`
-        ),
-      ],
-      'this workspace — .claude/',
-      `**Project** — agents, skills, and config that apply only to **this workspace**.\n\nFiles live in \`.claude/\` at the root of the open folder.`
-    );
-
-    const globRoot = makeSection(
-      globLabel,
-      [
-        makeSection(
-          `Agents (${globAgents.length})`,
-          toItems(globAgents),
-          `~/.claude/agents/`,
-          `**Global agents** — defined in \`~/.claude/agents/\` on your machine.\n\nAvailable in every project. Same format as project agents.`
-        ),
-        makeSection(
-          `Skills (${globSkills.length})`,
-          toItems(globSkills),
-          `~/.claude/skills/`,
-          `**Global skills** — defined in \`~/.claude/skills/\` on your machine.\n\nAvailable as slash commands in every project. Installed skills (e.g. \`artifact-design\`, \`dataviz\`) live here.`
-        ),
-        makeSection(
-          'Config Files',
-          toConfigItems(globConfigFiles),
-          '~/.claude/',
-          `**Global config files**\n\n- \`~/.claude/CLAUDE.md\` — instructions Claude reads in every session on this machine\n- \`~/.claude/settings.json\` — your personal default permissions and hooks`
-        ),
-      ],
-      'all projects — ~/.claude/',
-      `**Global** — agents, skills, and config that apply to **every project** on this machine.\n\nFiles live in \`~/.claude/\` in your home directory.`
-    );
-
-    // Session activity — agents called in the current session transcript
-    const transcript = this.currentTranscript ?? findLatestTranscript(cwd);
-    const agentCalls = transcript ? parseAgentCallsFromTranscript(transcript) : [];
-
     // Cache for disable-all / enable-all
     const allSkills = [...projAgents, ...projSkills, ...globAgents, ...globSkills];
     this.lastScannedSkills = allSkills;
     const skillFileByName = new Map<string, string>(
       allSkills.map(s => [s.name.toLowerCase(), s.filePath])
     );
+
+    // Session activity — agents called in the current session transcript
+    const transcript = this.currentTranscript ?? findLatestTranscript(cwd);
+    const agentCalls = transcript ? parseAgentCallsFromTranscript(transcript) : [];
 
     const activityChildren = agentCalls.length > 0
       ? agentCalls.map(call => {
@@ -501,18 +443,87 @@ class SkillsProvider implements vscode.TreeDataProvider<SkillsTreeItem> {
           vscode.TreeItemCollapsibleState.None
         )];
 
-    const activityLabel = agentCalls.length > 0
-      ? `Session Activity (${agentCalls.length})`
-      : 'Session Activity';
-
     const activityRoot = makeSection(
-      activityLabel,
+      agentCalls.length > 0 ? `Session Activity (${agentCalls.length})` : 'Session Activity',
       activityChildren,
       agentCalls.length > 0 ? 'agents called this session' : 'no agents called yet',
       `**Session Activity** — agents Claude delegated to in the current session.\n\nRead live from \`~/.claude/projects/*/‌*.jsonl\` (the session transcript). Updates automatically as Claude calls the Agent tool.\n\nClick an item to open its definition file.`
     );
 
-    return [activityRoot, projRoot, globRoot];
+    // Agents root — project + global as sub-groups
+    const projAgentsDisabled = projAgents.filter(s => s.isDisabled).length;
+    const globAgentsDisabled = globAgents.filter(s => s.isDisabled).length;
+    const totalAgents = projAgents.length + globAgents.length;
+    const totalAgentsDisabled = projAgentsDisabled + globAgentsDisabled;
+
+    const agentsRoot = makeSection(
+      `Agents (${totalAgents})${totalAgentsDisabled ? ` — ${totalAgentsDisabled} off` : ''}`,
+      [
+        makeSection(
+          `Project (${projAgents.length})`,
+          toItems(projAgents),
+          `.claude/agents/`,
+          `**Project agents** — defined in \`.claude/agents/\` inside this workspace.\n\nClaude delegates tasks to these when you ask it to code, review, or research. Each is a \`.md\` file with a name, description, and instructions.`
+        ),
+        makeSection(
+          `Global (${globAgents.length})`,
+          toItems(globAgents),
+          `~/.claude/agents/`,
+          `**Global agents** — defined in \`~/.claude/agents/\` on your machine.\n\nAvailable in every project. Same format as project agents.`
+        ),
+      ],
+      `${projAgents.length} project · ${globAgents.length} global`,
+      `**Agents** — specialized sub-agents Claude can delegate tasks to.\n\nProject agents are in \`.claude/agents/\`, global agents in \`~/.claude/agents/\`.`
+    );
+
+    // Skills root — project + global as sub-groups
+    const projSkillsDisabled = projSkills.filter(s => s.isDisabled).length;
+    const globSkillsDisabled = globSkills.filter(s => s.isDisabled).length;
+    const totalSkills = projSkills.length + globSkills.length;
+    const totalSkillsDisabled = projSkillsDisabled + globSkillsDisabled;
+
+    const skillsRoot = makeSection(
+      `Skills (${totalSkills})${totalSkillsDisabled ? ` — ${totalSkillsDisabled} off` : ''}`,
+      [
+        makeSection(
+          `Project (${projSkills.length})`,
+          toItems(projSkills),
+          `.claude/skills/`,
+          `**Project skills** — defined in \`.claude/skills/\` inside this workspace.\n\nSkills are slash commands and prompt snippets loaded with the Skill tool (e.g. \`/code-review\`). Each lives in its own subfolder with a \`SKILL.md\` file.`
+        ),
+        makeSection(
+          `Global (${globSkills.length})`,
+          toItems(globSkills),
+          `~/.claude/skills/`,
+          `**Global skills** — defined in \`~/.claude/skills/\` on your machine.\n\nAvailable as slash commands in every project. Installed skills (e.g. \`artifact-design\`, \`dataviz\`) live here.`
+        ),
+      ],
+      `${projSkills.length} project · ${globSkills.length} global`,
+      `**Skills** — slash commands and prompt snippets Claude loads with the Skill tool.\n\nProject skills are in \`.claude/skills/\`, global skills in \`~/.claude/skills/\`.`
+    );
+
+    // Config files root
+    const configRoot = makeSection(
+      'Config Files',
+      [
+        makeSection(
+          'Project',
+          toConfigItems(projConfigFiles),
+          'CLAUDE.md · settings.json',
+          `**Project config files**\n\n- \`CLAUDE.md\` — instructions Claude reads at the start of every session in this project\n- \`settings.json\` — project-level permissions, hooks, and env vars\n- \`settings.local.json\` — your personal overrides (not committed to git)`
+        ),
+        makeSection(
+          'Global',
+          toConfigItems(globConfigFiles),
+          '~/.claude/',
+          `**Global config files**\n\n- \`~/.claude/CLAUDE.md\` — instructions Claude reads in every session on this machine\n- \`~/.claude/settings.json\` — your personal default permissions and hooks`
+        ),
+      ],
+      'CLAUDE.md · settings.json',
+      `**Config files** — instructions and permissions Claude reads on startup.\n\nProject config is in \`.claude/\`, global config in \`~/.claude/\`.`
+    );
+
+    return [activityRoot, agentsRoot, skillsRoot, configRoot];
   }
 }
 
