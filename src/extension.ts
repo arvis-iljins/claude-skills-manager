@@ -41,6 +41,7 @@ interface ConfigFileData {
 interface ActivityData {
   isActivity: true;
   call: AgentCall;
+  filePath?: string;
 }
 
 type ItemData = SkillData | CategoryData | ConfigFileData | ActivityData;
@@ -236,6 +237,33 @@ function scanSkillsDir(dir: string, source: SkillSource): SkillData[] {
 }
 
 // ---------------------------------------------------------------------------
+// File decoration provider — colors disabled skill rows red
+// ---------------------------------------------------------------------------
+
+const DISABLED_SCHEME = 'claude-skill-disabled';
+const ENABLED_SCHEME  = 'claude-skill-enabled';
+
+class SkillDecorationProvider implements vscode.FileDecorationProvider {
+  provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
+    if (uri.scheme === DISABLED_SCHEME) {
+      return {
+        badge: '✗',
+        color: new vscode.ThemeColor('list.errorForeground'),
+        tooltip: 'Disabled — Claude Code will not load this skill',
+      };
+    }
+    if (uri.scheme === ENABLED_SCHEME) {
+      return {
+        badge: '✓',
+        color: new vscode.ThemeColor('terminal.ansiBlue'),
+        tooltip: 'Enabled',
+      };
+    }
+    return undefined;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tree item
 // ---------------------------------------------------------------------------
 
@@ -251,12 +279,19 @@ class SkillsTreeItem extends vscode.TreeItem {
     }
 
     if ('isActivity' in data) {
-      const { call } = data;
+      const { call, filePath } = data;
       this.label = call.name;
-      this.contextValue = 'activity';
+      this.contextValue = filePath ? 'activity-openable' : 'activity';
       this.description = relativeTime(call.timestamp);
-      this.tooltip = call.description || call.name;
+      this.tooltip = new vscode.MarkdownString(
+        `**${call.name}**\n\n` +
+        (call.description ? `${call.description}\n\n` : '') +
+        (filePath ? `*${filePath}*` : '*file not found in scanned skills*')
+      );
       this.iconPath = new vscode.ThemeIcon('arrow-right', new vscode.ThemeColor('terminal.ansiCyan'));
+      if (filePath) {
+        this.command = { command: 'claude-skills.openFile', title: 'Open File', arguments: [filePath] };
+      }
       return;
     }
 
@@ -282,9 +317,13 @@ class SkillsTreeItem extends vscode.TreeItem {
       (data.description ? `${data.description}\n\n` : '') +
       `*${data.filePath}*`
     );
+    // resourceUri drives the FileDecorationProvider (red = disabled, blue = enabled)
+    this.resourceUri = vscode.Uri.parse(
+      `${data.isDisabled ? DISABLED_SCHEME : ENABLED_SCHEME}:${encodeURIComponent(data.name)}`
+    );
     this.iconPath = data.isDisabled
       ? new vscode.ThemeIcon('circle-slash', new vscode.ThemeColor('list.errorForeground'))
-      : new vscode.ThemeIcon('pass-filled', new vscode.ThemeColor('terminal.ansiGreen'));
+      : new vscode.ThemeIcon('pass-filled', new vscode.ThemeColor('terminal.ansiBlue'));
     this.command = { command: 'claude-skills.openFile', title: 'Open File', arguments: [data.filePath] };
   }
 }
@@ -299,6 +338,7 @@ class SkillsProvider implements vscode.TreeDataProvider<SkillsTreeItem> {
 
   private transcriptWatcher: fs.FSWatcher | null = null;
   private currentTranscript: string | null = null;
+  private lastScannedSkills: SkillData[] = [];
 
   refresh(): void {
     this._onDidChangeTreeData.fire(undefined);
@@ -314,6 +354,10 @@ class SkillsProvider implements vscode.TreeDataProvider<SkillsTreeItem> {
     try {
       this.transcriptWatcher = fs.watch(transcript, () => this.refresh());
     } catch { /* file may not be watchable */ }
+  }
+
+  getAllSkills(): SkillData[] {
+    return this.lastScannedSkills;
   }
 
   dispose(): void {
@@ -388,10 +432,21 @@ class SkillsProvider implements vscode.TreeDataProvider<SkillsTreeItem> {
     const transcript = this.currentTranscript ?? findLatestTranscript(cwd);
     const agentCalls = transcript ? parseAgentCallsFromTranscript(transcript) : [];
 
+    // Cache for disable-all / enable-all
+    const allSkills = [...projAgents, ...projSkills, ...globAgents, ...globSkills];
+    this.lastScannedSkills = allSkills;
+    const skillFileByName = new Map<string, string>(
+      allSkills.map(s => [s.name.toLowerCase(), s.filePath])
+    );
+
     const activityChildren = agentCalls.length > 0
-      ? agentCalls.map(call =>
-          new SkillsTreeItem({ isActivity: true, call }, vscode.TreeItemCollapsibleState.None)
-        )
+      ? agentCalls.map(call => {
+          const filePath = skillFileByName.get(call.name.toLowerCase());
+          return new SkillsTreeItem(
+            { isActivity: true, call, filePath },
+            vscode.TreeItemCollapsibleState.None
+          );
+        })
       : [new SkillsTreeItem(
           { isCategory: true, name: 'No agent calls found in session', children: [] },
           vscode.TreeItemCollapsibleState.None
@@ -413,11 +468,16 @@ class SkillsProvider implements vscode.TreeDataProvider<SkillsTreeItem> {
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new SkillsProvider();
+  const decorationProvider = new SkillDecorationProvider();
 
   const treeView = vscode.window.createTreeView('claude-skills-tree', {
     treeDataProvider: provider,
     showCollapseAll: true,
   });
+
+  context.subscriptions.push(
+    vscode.window.registerFileDecorationProvider(decorationProvider)
+  );
 
   context.subscriptions.push(
     treeView,
@@ -465,6 +525,50 @@ export function activate(context: vscode.ExtensionContext): void {
       } catch (err) {
         vscode.window.showErrorMessage(`Failed to enable ${data.name}: ${(err as Error).message}`);
       }
+    }),
+
+    vscode.commands.registerCommand('claude-skills.disableAll', async () => {
+      const skills = provider.getAllSkills().filter(s => !s.isDisabled);
+      if (skills.length === 0) {
+        vscode.window.showInformationMessage('All skills are already disabled.');
+        return;
+      }
+      const answer = await vscode.window.showWarningMessage(
+        `Disable all ${skills.length} skills? Claude Code will not load any of them.`,
+        { modal: true }, 'Disable All'
+      );
+      if (answer !== 'Disable All') { return; }
+      const errors: string[] = [];
+      for (const s of skills) {
+        try { fs.renameSync(s.filePath, s.filePath + '.disabled'); }
+        catch { errors.push(s.name); }
+      }
+      if (errors.length) {
+        vscode.window.showErrorMessage(`Failed to disable: ${errors.join(', ')}`);
+      } else {
+        vscode.window.showInformationMessage(`Disabled ${skills.length} skills.`);
+      }
+      provider.refresh();
+    }),
+
+    vscode.commands.registerCommand('claude-skills.enableAll', async () => {
+      const skills = provider.getAllSkills().filter(s => s.isDisabled);
+      if (skills.length === 0) {
+        vscode.window.showInformationMessage('All skills are already enabled.');
+        return;
+      }
+      const errors: string[] = [];
+      for (const s of skills) {
+        const newPath = s.filePath.replace(/\.disabled$/, '');
+        try { fs.renameSync(s.filePath, newPath); }
+        catch { errors.push(s.name); }
+      }
+      if (errors.length) {
+        vscode.window.showErrorMessage(`Failed to enable: ${errors.join(', ')}`);
+      } else {
+        vscode.window.showInformationMessage(`Enabled ${skills.length} skills.`);
+      }
+      provider.refresh();
     }),
   );
 

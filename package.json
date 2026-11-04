@@ -53,6 +53,16 @@
         "command": "claude-skills.openFile",
         "title": "Open File",
         "icon": "$(go-to-file)"
+      },
+      {
+        "command": "claude-skills.disableAll",
+        "title": "Disable All Skills",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "claude-skills.enableAll",
+        "title": "Enable All Skills",
+        "icon": "$(pass)"
       }
     ],
     "menus": {
@@ -60,7 +70,17 @@
         {
           "command": "claude-skills.refresh",
           "when": "view == claude-skills-tree",
-          "group": "navigation"
+          "group": "navigation@3"
+        },
+        {
+          "command": "claude-skills.enableAll",
+          "when": "view == claude-skills-tree",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claude-skills.disableAll",
+          "when": "view == claude-skills-tree",
+          "group": "navigation@1"
         }
       ],
       "view/item/context": [
