@@ -10,6 +10,12 @@ import * as os from 'os';
 type SkillSource = 'project' | 'global';
 type SkillType = 'agent' | 'skill';
 
+interface AgentCall {
+  name: string;
+  description: string;
+  timestamp: number;
+}
+
 interface SkillData {
   id: string;
   name: string;
@@ -32,7 +38,12 @@ interface ConfigFileData {
   filePath: string;
 }
 
-type ItemData = SkillData | CategoryData | ConfigFileData;
+interface ActivityData {
+  isActivity: true;
+  call: AgentCall;
+}
+
+type ItemData = SkillData | CategoryData | ConfigFileData | ActivityData;
 
 // ---------------------------------------------------------------------------
 // Frontmatter parser
@@ -68,6 +79,94 @@ function readSkillMeta(filePath: string, fallbackName: string): { name: string; 
   } catch {
     return { name: fallbackName, description: '' };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Transcript / session activity
+// ---------------------------------------------------------------------------
+
+function findLatestTranscript(cwd: string): string | null {
+  // Claude Code stores transcripts at ~/.claude/projects/<hash>/<session>.jsonl
+  // The hash is derived from the project path.
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  if (!fs.existsSync(projectsDir)) { return null; }
+
+  let latestFile: string | null = null;
+  let latestTime = 0;
+
+  try {
+    const projectDirs = fs.readdirSync(projectsDir, { withFileTypes: true })
+      .filter(e => e.isDirectory());
+
+    for (const dir of projectDirs) {
+      const dirPath = path.join(projectsDir, dir.name);
+      try {
+        const files = fs.readdirSync(dirPath, { withFileTypes: true })
+          .filter(e => e.isFile() && e.name.endsWith('.jsonl'));
+        for (const file of files) {
+          const filePath = path.join(dirPath, file.name);
+          const stat = fs.statSync(filePath);
+          if (stat.mtimeMs > latestTime) {
+            latestTime = stat.mtimeMs;
+            latestFile = filePath;
+          }
+        }
+      } catch { /* skip unreadable dirs */ }
+    }
+  } catch { /* skip if projects dir unreadable */ }
+
+  return latestFile;
+}
+
+function relativeTime(ms: number): string {
+  const diff = Date.now() - ms;
+  if (diff < 60_000) { return 'just now'; }
+  if (diff < 3_600_000) { return `${Math.floor(diff / 60_000)}m ago`; }
+  return `${Math.floor(diff / 3_600_000)}h ago`;
+}
+
+function parseAgentCallsFromTranscript(transcriptPath: string): AgentCall[] {
+  const calls: AgentCall[] = [];
+  try {
+    const text = fs.readFileSync(transcriptPath, 'utf-8');
+    const lines = text.trim().split('\n').filter(Boolean);
+
+    // Read last 200 lines for recent activity
+    for (const line of lines.slice(-200)) {
+      try {
+        const obj = JSON.parse(line) as Record<string, unknown>;
+
+        // Format 1: { type: "assistant", message: { content: [...] }, timestamp }
+        const msgContent = (obj['message'] as Record<string, unknown> | undefined)?.['content'];
+        const timestamp = typeof obj['timestamp'] === 'string'
+          ? new Date(obj['timestamp']).getTime()
+          : (typeof obj['ts'] === 'number' ? (obj['ts'] as number) * 1000 : Date.now());
+
+        const contentArr = Array.isArray(msgContent) ? msgContent
+          : Array.isArray(obj['content']) ? obj['content'] as unknown[]
+          : [];
+
+        for (const block of contentArr) {
+          const b = block as Record<string, unknown>;
+          if (b['type'] === 'tool_use' && b['name'] === 'Agent') {
+            const input = (b['input'] as Record<string, unknown>) ?? {};
+            const agentType = (input['subagentType'] as string | undefined) ?? '';
+            const description = (input['description'] as string | undefined) ?? '';
+            const name = agentType || description.slice(0, 40) || 'unknown agent';
+            calls.push({ name, description, timestamp });
+          }
+        }
+      } catch { /* skip malformed lines */ }
+    }
+  } catch { /* file unreadable */ }
+
+  // Most recent first, deduplicated by name (keep latest occurrence)
+  const seen = new Set<string>();
+  return calls.reverse().filter(c => {
+    if (seen.has(c.name)) { return false; }
+    seen.add(c.name);
+    return true;
+  }).slice(0, 10);
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +250,16 @@ class SkillsTreeItem extends vscode.TreeItem {
       return;
     }
 
+    if ('isActivity' in data) {
+      const { call } = data;
+      this.label = call.name;
+      this.contextValue = 'activity';
+      this.description = relativeTime(call.timestamp);
+      this.tooltip = call.description || call.name;
+      this.iconPath = new vscode.ThemeIcon('arrow-right', new vscode.ThemeColor('terminal.ansiCyan'));
+      return;
+    }
+
     if ('isConfigFile' in data) {
       this.label = data.label;
       const exists = fs.existsSync(data.filePath);
@@ -188,8 +297,27 @@ class SkillsProvider implements vscode.TreeDataProvider<SkillsTreeItem> {
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<SkillsTreeItem | undefined>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
+  private transcriptWatcher: fs.FSWatcher | null = null;
+  private currentTranscript: string | null = null;
+
   refresh(): void {
     this._onDidChangeTreeData.fire(undefined);
+  }
+
+  watchTranscript(cwd: string): void {
+    const transcript = findLatestTranscript(cwd);
+    if (!transcript || transcript === this.currentTranscript) { return; }
+
+    this.transcriptWatcher?.close();
+    this.currentTranscript = transcript;
+
+    try {
+      this.transcriptWatcher = fs.watch(transcript, () => this.refresh());
+    } catch { /* file may not be watchable */ }
+  }
+
+  dispose(): void {
+    this.transcriptWatcher?.close();
   }
 
   getTreeItem(element: SkillsTreeItem): SkillsTreeItem {
@@ -206,6 +334,9 @@ class SkillsProvider implements vscode.TreeDataProvider<SkillsTreeItem> {
   private buildRoots(): SkillsTreeItem[] {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     const home = os.homedir();
+
+    // Keep transcript watcher pointed at the latest session file
+    this.watchTranscript(cwd);
 
     const projAgents = scanAgentsDir(path.join(cwd, '.claude', 'agents'), 'project');
     const projSkills = scanSkillsDir(path.join(cwd, '.claude', 'skills'), 'project');
@@ -253,7 +384,26 @@ class SkillsProvider implements vscode.TreeDataProvider<SkillsTreeItem> {
       makeSection('Config Files', toConfigItems(globConfigFiles)),
     ]);
 
-    return [projRoot, globRoot];
+    // Session activity — agents called in the current session transcript
+    const transcript = this.currentTranscript ?? findLatestTranscript(cwd);
+    const agentCalls = transcript ? parseAgentCallsFromTranscript(transcript) : [];
+
+    const activityChildren = agentCalls.length > 0
+      ? agentCalls.map(call =>
+          new SkillsTreeItem({ isActivity: true, call }, vscode.TreeItemCollapsibleState.None)
+        )
+      : [new SkillsTreeItem(
+          { isCategory: true, name: 'No agent calls found in session', children: [] },
+          vscode.TreeItemCollapsibleState.None
+        )];
+
+    const activityLabel = agentCalls.length > 0
+      ? `Session Activity — ${agentCalls.length} agents used`
+      : 'Session Activity';
+
+    const activityRoot = makeSection(activityLabel, activityChildren);
+
+    return [activityRoot, projRoot, globRoot];
   }
 }
 
@@ -271,6 +421,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     treeView,
+    { dispose: () => provider.dispose() },
 
     vscode.commands.registerCommand('claude-skills.refresh', () => provider.refresh()),
 
@@ -326,8 +477,13 @@ export function activate(context: vscode.ExtensionContext): void {
     watcher.onDidDelete(() => provider.refresh()),
   );
 
-  // Periodic refresh to catch changes in ~/.claude (outside workspace)
-  const timer = setInterval(() => provider.refresh(), 60_000);
+  // Periodic refresh: catch global dir changes + re-check for a new session transcript
+  const timer = setInterval(() => {
+    provider.watchTranscript(
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd()
+    );
+    provider.refresh();
+  }, 30_000);
   context.subscriptions.push({ dispose: () => clearInterval(timer) });
 }
 

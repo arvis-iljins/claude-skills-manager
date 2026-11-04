@@ -4,12 +4,13 @@ A VS Code sidebar that lists all your Claude Code agents, skills, and config fil
 
 ## Features
 
+- **Session Activity** — shows which agents Claude called in the current session, with a relative timestamp (reads `~/.claude/projects/*/‌*.jsonl`)
 - **Project panel** — scans `.claude/agents/` and `.claude/skills/` in the open workspace
 - **Global panel** — scans `~/.claude/agents/` and `~/.claude/skills/`
 - **Config files** — shows whether `CLAUDE.md`, `settings.json`, `settings.local.json` exist and opens them on click
 - **Enable / Disable** — renames a skill file to `*.md.disabled` to prevent Claude Code from loading it; rename back to re-enable
 - **Click to open** — click any skill to open its definition file in the editor
-- **Auto-refresh** — reloads the tree whenever files in `.claude/` change, and every 60 s for global changes
+- **Live transcript watching** — the Activity section updates automatically as Claude delegates to agents
 
 ## Install
 
