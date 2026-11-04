@@ -252,6 +252,7 @@ class SkillsProvider {
     this.currentTranscript = null;
     this.lastScannedSkills = [];
     this.filterText = '';
+    this.sessionClearedAt = 0;
   }
   refresh() { this._onDidChangeTreeData.fire(undefined); }
   watchTranscript(cwd) {
@@ -281,18 +282,18 @@ class SkillsProvider {
       ? skills.filter(s => s.name.toLowerCase().includes(ft) || s.description.toLowerCase().includes(ft))
       : skills;
 
-    const projAgents = applyFilter(scanAgentsDir(path.join(cwd, '.claude', 'agents'), 'project'));
-    const projSkills = applyFilter(scanSkillsDir(path.join(cwd, '.claude', 'skills'), 'project'));
-    const globAgents = applyFilter(scanAgentsDir(path.join(home, '.claude', 'agents'), 'global'));
-    const globSkills = applyFilter(scanSkillsDir(path.join(home, '.claude', 'skills'), 'global'));
+    // scan once, derive filtered views and unfiltered cache from the same results
+    const rawProjAgents = scanAgentsDir(path.join(cwd, '.claude', 'agents'), 'project');
+    const rawProjSkills = scanSkillsDir(path.join(cwd, '.claude', 'skills'), 'project');
+    const rawGlobAgents = scanAgentsDir(path.join(home, '.claude', 'agents'), 'global');
+    const rawGlobSkills = scanSkillsDir(path.join(home, '.claude', 'skills'), 'global');
 
-    // always cache unfiltered list for disable-all / enable-all
-    this.lastScannedSkills = [
-      ...scanAgentsDir(path.join(cwd, '.claude', 'agents'), 'project'),
-      ...scanSkillsDir(path.join(cwd, '.claude', 'skills'), 'project'),
-      ...scanAgentsDir(path.join(home, '.claude', 'agents'), 'global'),
-      ...scanSkillsDir(path.join(home, '.claude', 'skills'), 'global'),
-    ];
+    const projAgents = applyFilter(rawProjAgents);
+    const projSkills = applyFilter(rawProjSkills);
+    const globAgents = applyFilter(rawGlobAgents);
+    const globSkills = applyFilter(rawGlobSkills);
+
+    this.lastScannedSkills = [...rawProjAgents, ...rawProjSkills, ...rawGlobAgents, ...rawGlobSkills];
     const skillFileByName = new Map(this.lastScannedSkills.map(s => [s.name.toLowerCase(), s.filePath]));
 
     const toItems = s => s.map(x => new SkillsTreeItem(x, vscode.TreeItemCollapsibleState.None));
@@ -316,7 +317,7 @@ class SkillsProvider {
     const transcript = this.currentTranscript ?? findLatestTranscript();
     const agentCallsAll = transcript ? parseAgentCallsFromTranscript(transcript) : [];
 
-    const makeDetailItem = (iconId, text, cmd) => new SkillsTreeItem({ isDetail: true, text, iconId, command: cmd || undefined }, vscode.TreeItemCollapsibleState.None);
+    const makeDetailItem = (iconId, text, cmd) => new SkillsTreeItem({ isDetail: true, text, iconId, command: cmd }, vscode.TreeItemCollapsibleState.None);
     const makeActivityItem = (call) => {
       const filePath = skillFileByName.get(call.name.toLowerCase());
       const details = [];
@@ -326,16 +327,25 @@ class SkillsProvider {
       if (filePath) details.push(makeDetailItem('file', `Open: ${path.basename(filePath)}`, { command: 'claude-skills.openFile', title: 'Open', arguments: [filePath] }));
       return new SkillsTreeItem({ isActivity: true, call, filePath, children: details }, details.length > 0 ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
     };
-    const agentCallItems = agentCallsAll.filter(c => c.toolType === 'agent').map(makeActivityItem);
-    const skillCallItems = agentCallsAll.filter(c => c.toolType === 'skill').map(makeActivityItem);
+
+    const clearedAt = this.sessionClearedAt;
+    const visibleCalls = agentCallsAll.filter(c => c.timestamp > clearedAt);
+    const agentCallItems = visibleCalls.filter(c => c.toolType === 'agent').map(makeActivityItem);
+    const skillCalls = visibleCalls.filter(c => c.toolType === 'skill');
+    const customSkillItems = skillCalls.filter(c => skillFileByName.has(c.name.toLowerCase())).map(makeActivityItem);
+    const builtinSkillItems = skillCalls.filter(c => !skillFileByName.has(c.name.toLowerCase())).map(makeActivityItem);
+
     let activityChildren;
-    if (agentCallsAll.length > 0) {
+    if (visibleCalls.length > 0) {
+      const skillChildren = [];
+      if (customSkillItems.length) skillChildren.push(makeSection(`Custom (${customSkillItems.length})`, customSkillItems, 'from .claude/skills/', `**Custom skills** — skills from your \`.claude/skills/\` or \`~/.claude/skills/\` folder.`));
+      if (builtinSkillItems.length) skillChildren.push(makeSection(`Claude built-in (${builtinSkillItems.length})`, builtinSkillItems, 'anthropic skills', `**Claude built-in skills** — skills shipped with Claude Code (e.g. \`code-review\`, \`simplify\`, \`dataviz\`).`));
       activityChildren = [
         makeSection(`Agents (${agentCallItems.length})`, agentCallItems, `${agentCallItems.length} called`, `**Agents in session** — sub-agents Claude delegated work to this session.`),
-        makeSection(`Skills (${skillCallItems.length})`, skillCallItems, `${skillCallItems.length} loaded`, `**Skills in session** — skills Claude loaded via the Skill tool this session.`),
+        makeSection(`Skills (${skillCalls.length})`, skillChildren.length > 0 ? skillChildren : [], `${skillCalls.length} loaded`, `**Skills in session** — skills Claude loaded via the Skill tool this session.`),
       ];
     } else {
-      activityChildren = [new SkillsTreeItem({ isCategory: true, name: 'No agent calls found in session', children: [] }, vscode.TreeItemCollapsibleState.Collapsed)];
+      activityChildren = [new SkillsTreeItem({ isCategory: true, name: 'No activity yet — try calling an agent or skill', children: [] }, vscode.TreeItemCollapsibleState.None)];
     }
 
     const totalAgents = projAgents.length + globAgents.length;
@@ -345,9 +355,9 @@ class SkillsProvider {
 
     return [
       makeSection(
-        agentCalls.length > 0 ? `Session Activity (${agentCalls.length})` : 'Session Activity',
+        visibleCalls.length > 0 ? `Session Activity (${visibleCalls.length})` : 'Session Activity',
         activityChildren,
-        agentCalls.length > 0 ? 'agents called this session' : 'no agents called yet',
+        visibleCalls.length > 0 ? `${visibleCalls.length} calls this session` : 'no activity yet',
         `**Session Activity** — agents Claude delegated to in the current session.\n\nRead live from \`~/.claude/projects/*/‌*.jsonl\`. Updates automatically as Claude calls the Agent tool.\n\nClick an item to open its definition file.`
       ),
       makeSection(
@@ -404,6 +414,11 @@ function activate(context) {
     vscode.commands.registerCommand('claude-skills.clearFilter', () => {
       provider.filterText = '';
       treeView.message = undefined;
+      provider.refresh();
+    }),
+
+    vscode.commands.registerCommand('claude-skills.clearActivity', () => {
+      provider.sessionClearedAt = Date.now();
       provider.refresh();
     }),
 
