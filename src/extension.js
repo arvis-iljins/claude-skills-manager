@@ -5,6 +5,24 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+function readDisabledSet(configDir) {
+  try {
+    const f = path.join(configDir, 'settings.local.json');
+    if (!fs.existsSync(f)) return new Set();
+    const obj = JSON.parse(fs.readFileSync(f, 'utf-8'));
+    return new Set((obj.disabledSkills ?? []).map(s => s.toLowerCase()));
+  } catch { return new Set(); }
+}
+
+function writeDisabledSet(configDir, set) {
+  const f = path.join(configDir, 'settings.local.json');
+  let obj = {};
+  try { if (fs.existsSync(f)) obj = JSON.parse(fs.readFileSync(f, 'utf-8')); } catch {}
+  obj.disabledSkills = [...set];
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(f, JSON.stringify(obj, null, 2));
+}
+
 function parseFrontmatter(text) {
   let name = '', description = '';
   const lines = text.split('\n');
@@ -283,10 +301,14 @@ class SkillsProvider {
       : skills;
 
     // scan once, derive filtered views and unfiltered cache from the same results
-    const rawProjAgents = scanAgentsDir(path.join(cwd, '.claude', 'agents'), 'project');
-    const rawProjSkills = scanSkillsDir(path.join(cwd, '.claude', 'skills'), 'project');
-    const rawGlobAgents = scanAgentsDir(path.join(home, '.claude', 'agents'), 'global');
-    const rawGlobSkills = scanSkillsDir(path.join(home, '.claude', 'skills'), 'global');
+    const projDisabled = readDisabledSet(path.join(cwd, '.claude'));
+    const globDisabled = readDisabledSet(path.join(home, '.claude'));
+    const applyDisabled = (items, disabled) => items.map(s => disabled.has(s.name.toLowerCase()) ? { ...s, isDisabled: true } : s);
+
+    const rawProjAgents = applyDisabled(scanAgentsDir(path.join(cwd, '.claude', 'agents'), 'project'), projDisabled);
+    const rawProjSkills = applyDisabled(scanSkillsDir(path.join(cwd, '.claude', 'skills'), 'project'), projDisabled);
+    const rawGlobAgents = applyDisabled(scanAgentsDir(path.join(home, '.claude', 'agents'), 'global'), globDisabled);
+    const rawGlobSkills = applyDisabled(scanSkillsDir(path.join(home, '.claude', 'skills'), 'global'), globDisabled);
 
     const projAgents = applyFilter(rawProjAgents);
     const projSkills = applyFilter(rawProjSkills);
@@ -430,38 +452,63 @@ function activate(context) {
     vscode.commands.registerCommand('claude-skills.disableSkill', async (item) => {
       const data = item?.data;
       if (!data || 'isCategory' in data || 'isConfigFile' in data || 'isActivity' in data || data.isDisabled) return;
-      const answer = await vscode.window.showWarningMessage(`Disable "${data.name}"? The file will be renamed with a .disabled suffix so Claude Code won't load it.`, { modal: true }, 'Disable');
-      if (answer !== 'Disable') return;
-      try { fs.renameSync(data.filePath, data.filePath + '.disabled'); vscode.window.showInformationMessage(`Disabled: ${data.name}`); provider.refresh(); }
-      catch (err) { vscode.window.showErrorMessage(`Failed to disable ${data.name}: ${err.message}`); }
+      const configDir = data.source === 'global'
+        ? path.join(os.homedir(), '.claude')
+        : path.join((vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd()), '.claude');
+      try {
+        const set = readDisabledSet(configDir);
+        set.add(data.name.toLowerCase());
+        writeDisabledSet(configDir, set);
+        vscode.window.showInformationMessage(`Disabled: ${data.name} (saved to settings.local.json — no git changes)`);
+        provider.refresh();
+      } catch (err) { vscode.window.showErrorMessage(`Failed to disable ${data.name}: ${err.message}`); }
     }),
 
     vscode.commands.registerCommand('claude-skills.enableSkill', (item) => {
       const data = item?.data;
       if (!data || 'isCategory' in data || 'isConfigFile' in data || 'isActivity' in data || !data.isDisabled) return;
-      try { fs.renameSync(data.filePath, data.filePath.replace(/\.disabled$/, '')); vscode.window.showInformationMessage(`Enabled: ${data.name}`); provider.refresh(); }
-      catch (err) { vscode.window.showErrorMessage(`Failed to enable ${data.name}: ${err.message}`); }
+      const configDir = data.source === 'global'
+        ? path.join(os.homedir(), '.claude')
+        : path.join((vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd()), '.claude');
+      try {
+        const set = readDisabledSet(configDir);
+        set.delete(data.name.toLowerCase());
+        writeDisabledSet(configDir, set);
+        vscode.window.showInformationMessage(`Enabled: ${data.name}`);
+        provider.refresh();
+      } catch (err) { vscode.window.showErrorMessage(`Failed to enable ${data.name}: ${err.message}`); }
     }),
 
     vscode.commands.registerCommand('claude-skills.disableAll', async () => {
       const skills = provider.getAllSkills().filter(s => !s.isDisabled);
       if (!skills.length) { vscode.window.showInformationMessage('All skills are already disabled.'); return; }
-      const answer = await vscode.window.showWarningMessage(`Disable all ${skills.length} skills?`, { modal: true }, 'Disable All');
+      const answer = await vscode.window.showWarningMessage(`Disable all ${skills.length} skills? (saved to settings.local.json — no git changes)`, { modal: true }, 'Disable All');
       if (answer !== 'Disable All') return;
-      const errors = [];
-      for (const s of skills) { try { fs.renameSync(s.filePath, s.filePath + '.disabled'); } catch { errors.push(s.name); } }
-      if (errors.length) vscode.window.showErrorMessage(`Failed: ${errors.join(', ')}`);
-      else vscode.window.showInformationMessage(`Disabled ${skills.length} skills.`);
+      const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+      const projConfigDir = path.join(cwd, '.claude');
+      const globConfigDir = path.join(os.homedir(), '.claude');
+      const projSet = readDisabledSet(projConfigDir);
+      const globSet = readDisabledSet(globConfigDir);
+      for (const s of skills) {
+        (s.source === 'global' ? globSet : projSet).add(s.name.toLowerCase());
+      }
+      try { writeDisabledSet(projConfigDir, projSet); writeDisabledSet(globConfigDir, globSet); }
+      catch (err) { vscode.window.showErrorMessage(`Failed: ${err.message}`); return; }
+      vscode.window.showInformationMessage(`Disabled ${skills.length} skills.`);
       provider.refresh();
     }),
 
     vscode.commands.registerCommand('claude-skills.enableAll', async () => {
       const skills = provider.getAllSkills().filter(s => s.isDisabled);
       if (!skills.length) { vscode.window.showInformationMessage('All skills are already enabled.'); return; }
-      const errors = [];
-      for (const s of skills) { try { fs.renameSync(s.filePath, s.filePath.replace(/\.disabled$/, '')); } catch { errors.push(s.name); } }
-      if (errors.length) vscode.window.showErrorMessage(`Failed: ${errors.join(', ')}`);
-      else vscode.window.showInformationMessage(`Enabled ${skills.length} skills.`);
+      const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+      const projConfigDir = path.join(cwd, '.claude');
+      const globConfigDir = path.join(os.homedir(), '.claude');
+      try {
+        writeDisabledSet(projConfigDir, new Set());
+        writeDisabledSet(globConfigDir, new Set());
+      } catch (err) { vscode.window.showErrorMessage(`Failed: ${err.message}`); return; }
+      vscode.window.showInformationMessage(`Enabled ${skills.length} skills.`);
       provider.refresh();
     }),
   );
