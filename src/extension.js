@@ -417,38 +417,30 @@ class SkillsProvider {
 const HOOK_SCRIPT_CONTENT = `'use strict';
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 
+// SubagentStart hook: receives { agent_type, cwd, ... } on stdin.
+// Exit 2 blocks the agent from starting.
 let raw = '';
 process.stdin.on('data', chunk => raw += chunk);
 process.stdin.on('end', () => {
   try {
     const input = JSON.parse(raw || '{}');
-    if (input.tool_name !== 'Agent') { process.exit(0); return; }
-    const toolInput = input.tool_input ?? {};
-    const agentType = (toolInput.subagent_type ?? toolInput.subagentType ?? '').toLowerCase();
+    const agentType = (input.agent_type ?? '').toLowerCase();
     if (!agentType) { process.exit(0); return; }
-    const checkPaths = [
-      path.join(process.cwd(), '.claude', 'settings.local.json'),
-      path.join(os.homedir(), '.claude', 'settings.local.json'),
-    ];
-    for (const f of checkPaths) {
-      try {
-        const obj = JSON.parse(fs.readFileSync(f, 'utf-8'));
-        const disabled = (obj.disabledSkills ?? []).map(s => s.toLowerCase());
-        if (disabled.includes(agentType)) {
-          process.stdout.write(JSON.stringify({
-            hookSpecificOutput: {
-              hookEventName: 'PreToolUse',
-              permissionDecision: 'deny',
-              permissionDecisionReason: 'Agent "' + agentType + '" is disabled in Claude Skills Manager. Enable it in the VS Code sidebar to use it.'
-            }
-          }));
-          process.exit(0);
-          return;
-        }
-      } catch {}
-    }
+    const cwd = input.cwd ?? process.cwd();
+    const settingsPath = path.join(cwd, '.claude', 'settings.local.json');
+    try {
+      const obj = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      const disabled = (obj.disabledSkills ?? []).map(s => s.toLowerCase());
+      if (disabled.includes(agentType)) {
+        process.stdout.write(JSON.stringify({
+          decision: 'block',
+          reason: 'Agent "' + agentType + '" is disabled in Claude Skills Manager. Enable it in the VS Code sidebar to use it.'
+        }));
+        process.exit(2);
+        return;
+      }
+    } catch {}
     process.exit(0);
   } catch { process.exit(0); }
 });
@@ -458,7 +450,8 @@ function ensureHookInstalled() {
   const home = os.homedir();
   const claudeDir = path.join(home, '.claude');
   const scriptPath = path.join(claudeDir, 'skills-manager-block.js');
-  const settingsPath = path.join(claudeDir, 'settings.local.json');
+  // Hook must go in settings.json — settings.local.json is not read by Claude Code at global scope
+  const settingsPath = path.join(claudeDir, 'settings.json');
 
   try {
     fs.mkdirSync(claudeDir, { recursive: true });
@@ -468,16 +461,15 @@ function ensureHookInstalled() {
     try { if (fs.existsSync(settingsPath)) settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')); } catch {}
 
     const hookCommand = `node ${scriptPath}`;
-    const existing = (settings.hooks?.PreToolUse ?? []);
+    const existing = (settings.hooks?.SubagentStart ?? []);
     const alreadyRegistered = existing.some(entry =>
       entry.hooks?.some(h => h.type === 'command' && h.command === hookCommand)
     );
     if (alreadyRegistered) return;
 
     settings.hooks = settings.hooks ?? {};
-    settings.hooks.PreToolUse = settings.hooks.PreToolUse ?? [];
-    settings.hooks.PreToolUse.push({
-      matcher: 'Agent',
+    settings.hooks.SubagentStart = settings.hooks.SubagentStart ?? [];
+    settings.hooks.SubagentStart.push({
       hooks: [{ type: 'command', command: hookCommand, timeout: 5 }]
     });
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));

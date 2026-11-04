@@ -1,17 +1,17 @@
 # Claude Skills Manager
 
-A VS Code extension that shows all Claude agents, skills, and config files from your project (`.claude/`) and global (`~/.claude/`) directories. Tracks live session activity and lets you enable / disable agents and skills without touching any git-tracked files.
+A VS Code extension that shows all Claude agents, skills, and config files from your project (`.claude/`) and global (`~/.claude/`) directories. Tracks live session activity and lets you enable / disable agents without touching any git-tracked files.
 
 ---
 
 ## Features
 
-- **Session Activity** — live feed of every Agent and Skill tool call, read straight from `~/.claude/projects/*/‌*.jsonl`. Updates automatically as Claude delegates work.
+- **Session Activity** — live feed of every Agent and Skill tool call, read straight from `~/.claude/projects/*/*.jsonl`. Updates automatically as Claude delegates work.
 - **Agents** — browse project (`.claude/agents/`) and global (`~/.claude/agents/`) agents with frontmatter description, enable/disable toggle.
 - **Skills** — same for `.claude/skills/` and `~/.claude/skills/`.
 - **Config Files** — quick links to `CLAUDE.md`, `settings.json`, `settings.local.json` for both project and global scopes.
 - **Filter** — search bar across all agent and skill names and descriptions.
-- **Disable without git changes** — disabled state is stored in `settings.local.json` (gitignored), so your team never sees it.
+- **Hard disable** — disabled agents are truly blocked. Claude cannot use them even if it tries.
 
 ---
 
@@ -23,18 +23,55 @@ code --install-extension claude-skills-manager-0.1.0.vsix
 
 Reload VS Code. The Claude shield icon appears in the Activity Bar.
 
+On first activation the extension automatically installs a blocking hook into `~/.claude/settings.json`. No manual setup needed.
+
 ---
 
 ## Disable / Enable
 
-Click the **✗** (circle-slash) icon on any agent or skill to disable it. Click **✓** (pass) to re-enable. The state is written to:
+Click the **✗** (circle-slash) icon on any agent to disable it. Click **✓** (pass) to re-enable.
 
-- **Project agent/skill** → `.claude/settings.local.json` in your workspace
-- **Global agent/skill** → `~/.claude/settings.local.json`
+**What actually happens:**
 
-Both files are gitignored — no git diff, no accidental commits.
+1. The disabled agent name is written to `.claude/settings.local.json` in your workspace under `disabledSkills` (this file is gitignored — no git diff, no accidental commits).
 
-> **Note:** Disabling currently marks the item in the panel (red icon, ✗ badge). It acts as a personal reminder and a signal to future prompt injection — see **Roadmap** below.
+2. When Claude Code tries to start any agent, a `SubagentStart` hook fires. It runs `~/.claude/skills-manager-block.js`, which reads `.claude/settings.local.json` and exits with code 2 if the agent is in the disabled list.
+
+3. Claude Code treats exit code 2 as a hard block — the agent never starts and Claude sees an error message: *"Agent X is disabled in Claude Skills Manager. Enable it in the VS Code sidebar to use it."*
+
+This is a **real block** at the runtime level, not a visual hint. Claude cannot delegate to a disabled agent.
+
+---
+
+## How the hook works
+
+The extension installs one hook into `~/.claude/settings.json` on activation:
+
+```json
+{
+  "hooks": {
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/skills-manager-block.js",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The `SubagentStart` event fires before every agent starts. The hook script receives a JSON payload on stdin with the `agent_type` field (e.g. `"n8n-workflow-builder"`). It reads the project's `settings.local.json`, checks the `disabledSkills` list, and exits with code 2 to block or 0 to allow.
+
+**Key details:**
+- The hook reads `cwd` from the payload so it always checks the correct project's disable list.
+- Disabling is per-project. Each workspace has its own `settings.local.json`.
+- The hook script is at `~/.claude/skills-manager-block.js` and is re-written on every VS Code activation to stay up to date.
+- `~/.claude/settings.json` is NOT gitignored — it's your personal global config. The extension only appends to the `hooks.SubagentStart` array and never removes other entries.
 
 ---
 
@@ -59,24 +96,7 @@ Just share the `.vsix` file. Each person installs it independently:
 code --install-extension claude-skills-manager-0.1.0.vsix
 ```
 
-Each teammate has their own independent disabled list (stored locally in their `settings.local.json`). What you disable does not affect anyone else's session.
-
----
-
-## Roadmap — Hard Disable via Prompt Hook
-
-The planned approach for truly blocking Claude from using a disabled agent (not just showing it red):
-
-1. **Store disabled list** in `settings.local.json` — already done, gitignored.
-2. **Register a `prompt.compose` hook** in Claude Code that reads the disabled list before each message and injects:
-   ```
-   DISABLED AGENTS — do not delegate to: n8n-workflow-builder, ecom-backend-coder
-   ```
-   into the system prompt.
-3. Claude sees the instruction and won't delegate to those agents, even though their `.md` files still exist on disk.
-4. Zero file renames, zero git changes — the hook reads from `settings.local.json` at runtime.
-
-**Current blocker:** the `cc-plugin-sec-default` Claude Code plugin runs first and swallows the `prompt.compose` event before the skills-manager hook fires. Fixing hook priority is the remaining work before this is functional.
+On first activation the hook is installed automatically. Each teammate has their own independent disabled list (stored locally in their project's `settings.local.json`). What you disable does not affect anyone else's session.
 
 ---
 
