@@ -63,6 +63,16 @@
         "command": "claude-skills.enableAll",
         "title": "Enable All Skills",
         "icon": "$(pass)"
+      },
+      {
+        "command": "claude-skills.setFilter",
+        "title": "Filter Skills",
+        "icon": "$(search)"
+      },
+      {
+        "command": "claude-skills.clearFilter",
+        "title": "Clear Filter",
+        "icon": "$(clear-all)"
       }
     ],
     "menus": {
@@ -81,6 +91,16 @@
           "command": "claude-skills.disableAll",
           "when": "view == claude-skills-tree",
           "group": "navigation@1"
+        },
+        {
+          "command": "claude-skills.setFilter",
+          "when": "view == claude-skills-tree",
+          "group": "navigation@4"
+        },
+        {
+          "command": "claude-skills.clearFilter",
+          "when": "view == claude-skills-tree",
+          "group": "navigation@5"
         }
       ],
       "view/item/context": [
