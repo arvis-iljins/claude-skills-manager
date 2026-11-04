@@ -30,6 +30,8 @@ interface CategoryData {
   isCategory: true;
   name: string;
   children: SkillsTreeItem[];
+  note?: string;
+  tooltip?: string;
 }
 
 interface ConfigFileData {
@@ -275,6 +277,8 @@ class SkillsTreeItem extends vscode.TreeItem {
       this.label = data.name;
       this.contextValue = 'category';
       this.iconPath = new vscode.ThemeIcon('folder');
+      if (data.note) { this.description = data.note; }
+      if (data.tooltip) { this.tooltip = new vscode.MarkdownString(data.tooltip); }
       return;
     }
 
@@ -404,29 +408,74 @@ class SkillsProvider implements vscode.TreeDataProvider<SkillsTreeItem> {
       { label: 'settings.json', filePath: path.join(home, '.claude', 'settings.json') },
     ];
 
-    const makeSection = (name: string, children: SkillsTreeItem[]) =>
+    const makeSection = (
+      name: string,
+      children: SkillsTreeItem[],
+      note?: string,
+      tooltip?: string
+    ) =>
       new SkillsTreeItem(
-        { isCategory: true, name, children },
-        vscode.TreeItemCollapsibleState.Expanded
+        { isCategory: true, name, children, note, tooltip },
+        children.length > 0 ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed
       );
 
     const projDisabled = [...projAgents, ...projSkills].filter(s => s.isDisabled).length;
     const globDisabled = [...globAgents, ...globSkills].filter(s => s.isDisabled).length;
 
-    const projLabel = `Project — ${projAgents.length + projSkills.length} skills${projDisabled ? ` (${projDisabled} off)` : ''}`;
-    const globLabel = `Global — ${globAgents.length + globSkills.length} skills${globDisabled ? ` (${globDisabled} off)` : ''}`;
+    const projLabel = `Project (${projAgents.length + projSkills.length})${projDisabled ? ` — ${projDisabled} off` : ''}`;
+    const globLabel = `Global (${globAgents.length + globSkills.length})${globDisabled ? ` — ${globDisabled} off` : ''}`;
 
-    const projRoot = makeSection(projLabel, [
-      makeSection(`Agents (${projAgents.length})`, toItems(projAgents)),
-      makeSection(`Skills (${projSkills.length})`, toItems(projSkills)),
-      makeSection('Config Files', toConfigItems(projConfigFiles)),
-    ]);
+    const projRoot = makeSection(
+      projLabel,
+      [
+        makeSection(
+          `Agents (${projAgents.length})`,
+          toItems(projAgents),
+          `.claude/agents/`,
+          `**Project agents** — defined in \`.claude/agents/\` inside this workspace.\n\nClaude delegates tasks to these when you ask it to code, review, or research. Each is a \`.md\` file with a name, description, and instructions.`
+        ),
+        makeSection(
+          `Skills (${projSkills.length})`,
+          toItems(projSkills),
+          `.claude/skills/`,
+          `**Project skills** — defined in \`.claude/skills/\` inside this workspace.\n\nSkills are slash commands and prompt snippets loaded with the Skill tool (e.g. \`/code-review\`, \`/dataviz\`). Each lives in its own subfolder with a \`SKILL.md\` file.`
+        ),
+        makeSection(
+          'Config Files',
+          toConfigItems(projConfigFiles),
+          'CLAUDE.md · settings.json',
+          `**Project config files**\n\n- \`CLAUDE.md\` — instructions Claude reads at the start of every session in this project\n- \`settings.json\` — project-level permissions, hooks, and env vars\n- \`settings.local.json\` — your personal overrides (not committed to git)`
+        ),
+      ],
+      'this workspace — .claude/',
+      `**Project** — agents, skills, and config that apply only to **this workspace**.\n\nFiles live in \`.claude/\` at the root of the open folder.`
+    );
 
-    const globRoot = makeSection(globLabel, [
-      makeSection(`Agents (${globAgents.length})`, toItems(globAgents)),
-      makeSection(`Skills (${globSkills.length})`, toItems(globSkills)),
-      makeSection('Config Files', toConfigItems(globConfigFiles)),
-    ]);
+    const globRoot = makeSection(
+      globLabel,
+      [
+        makeSection(
+          `Agents (${globAgents.length})`,
+          toItems(globAgents),
+          `~/.claude/agents/`,
+          `**Global agents** — defined in \`~/.claude/agents/\` on your machine.\n\nAvailable in every project. Same format as project agents.`
+        ),
+        makeSection(
+          `Skills (${globSkills.length})`,
+          toItems(globSkills),
+          `~/.claude/skills/`,
+          `**Global skills** — defined in \`~/.claude/skills/\` on your machine.\n\nAvailable as slash commands in every project. Installed skills (e.g. \`artifact-design\`, \`dataviz\`) live here.`
+        ),
+        makeSection(
+          'Config Files',
+          toConfigItems(globConfigFiles),
+          '~/.claude/',
+          `**Global config files**\n\n- \`~/.claude/CLAUDE.md\` — instructions Claude reads in every session on this machine\n- \`~/.claude/settings.json\` — your personal default permissions and hooks`
+        ),
+      ],
+      'all projects — ~/.claude/',
+      `**Global** — agents, skills, and config that apply to **every project** on this machine.\n\nFiles live in \`~/.claude/\` in your home directory.`
+    );
 
     // Session activity — agents called in the current session transcript
     const transcript = this.currentTranscript ?? findLatestTranscript(cwd);
@@ -453,10 +502,15 @@ class SkillsProvider implements vscode.TreeDataProvider<SkillsTreeItem> {
         )];
 
     const activityLabel = agentCalls.length > 0
-      ? `Session Activity — ${agentCalls.length} agents used`
+      ? `Session Activity (${agentCalls.length})`
       : 'Session Activity';
 
-    const activityRoot = makeSection(activityLabel, activityChildren);
+    const activityRoot = makeSection(
+      activityLabel,
+      activityChildren,
+      agentCalls.length > 0 ? 'agents called this session' : 'no agents called yet',
+      `**Session Activity** — agents Claude delegated to in the current session.\n\nRead live from \`~/.claude/projects/*/‌*.jsonl\` (the session transcript). Updates automatically as Claude calls the Agent tool.\n\nClick an item to open its definition file.`
+    );
 
     return [activityRoot, projRoot, globRoot];
   }
