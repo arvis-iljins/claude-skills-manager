@@ -1,0 +1,111 @@
+{
+  "name": "claude-skills-manager",
+  "displayName": "Claude Skills Manager",
+  "description": "Browse, inspect, and toggle Claude agents, skills, and config files from your project and global ~/.claude folders",
+  "version": "0.1.0",
+  "publisher": "arvis-iljins",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/arvis-iljins/claude-skills-manager"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Other"],
+  "keywords": ["claude", "claude-code", "ai", "agents", "skills"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claude-skills",
+          "title": "Claude Skills",
+          "icon": "./assets/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claude-skills": [
+        {
+          "id": "claude-skills-tree",
+          "name": "Skills Manager"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claude-skills.refresh",
+        "title": "Claude Skills: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claude-skills.disableSkill",
+        "title": "Disable",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "claude-skills.enableSkill",
+        "title": "Enable",
+        "icon": "$(pass)"
+      },
+      {
+        "command": "claude-skills.openFile",
+        "title": "Open File",
+        "icon": "$(go-to-file)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claude-skills.refresh",
+          "when": "view == claude-skills-tree",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claude-skills.disableSkill",
+          "when": "view == claude-skills-tree && viewItem == skill-enabled",
+          "group": "inline@1"
+        },
+        {
+          "command": "claude-skills.enableSkill",
+          "when": "view == claude-skills-tree && viewItem == skill-disabled",
+          "group": "inline@1"
+        },
+        {
+          "command": "claude-skills.openFile",
+          "when": "view == claude-skills-tree && viewItem =~ /^skill-/",
+          "group": "inline@2"
+        },
+        {
+          "command": "claude-skills.disableSkill",
+          "when": "view == claude-skills-tree && viewItem == skill-enabled",
+          "group": "1_actions"
+        },
+        {
+          "command": "claude-skills.enableSkill",
+          "when": "view == claude-skills-tree && viewItem == skill-disabled",
+          "group": "1_actions"
+        },
+        {
+          "command": "claude-skills.openFile",
+          "when": "view == claude-skills-tree && viewItem =~ /^skill-/",
+          "group": "2_open"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.3.0"
+  }
+}
