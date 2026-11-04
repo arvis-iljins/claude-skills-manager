@@ -121,6 +121,7 @@ function findLatestTranscript(cwd) {
 }
 
 function relativeTime(ms) {
+  if (!ms) return '';
   const diff = Date.now() - ms;
   if (diff < 60_000) return 'just now';
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
@@ -148,7 +149,7 @@ function parseAgentCallsFromTranscript(transcriptPath) {
     for (const line of lines.slice(-400)) {
       try {
         const obj = JSON.parse(line);
-        const timestamp = typeof obj['timestamp'] === 'string' ? new Date(obj['timestamp']).getTime() : (typeof obj['ts'] === 'number' ? obj['ts'] * 1000 : Date.now());
+        const timestamp = typeof obj['timestamp'] === 'string' ? new Date(obj['timestamp']).getTime() : (typeof obj['ts'] === 'number' ? obj['ts'] * 1000 : 0);
         const msgObj = obj['message'];
         const usage = msgObj?.['usage'] ?? obj['usage'] ?? {};
         const totalTokens = (usage['input_tokens'] ?? 0) + (usage['output_tokens'] ?? 0);
@@ -413,7 +414,78 @@ class SkillsProvider {
   }
 }
 
+const HOOK_SCRIPT_CONTENT = `'use strict';
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+let raw = '';
+process.stdin.on('data', chunk => raw += chunk);
+process.stdin.on('end', () => {
+  try {
+    const input = JSON.parse(raw || '{}');
+    if (input.tool_name !== 'Agent') { process.exit(0); return; }
+    const toolInput = input.tool_input ?? {};
+    const agentType = (toolInput.subagent_type ?? toolInput.subagentType ?? '').toLowerCase();
+    if (!agentType) { process.exit(0); return; }
+    const checkPaths = [
+      path.join(process.cwd(), '.claude', 'settings.local.json'),
+      path.join(os.homedir(), '.claude', 'settings.local.json'),
+    ];
+    for (const f of checkPaths) {
+      try {
+        const obj = JSON.parse(fs.readFileSync(f, 'utf-8'));
+        const disabled = (obj.disabledSkills ?? []).map(s => s.toLowerCase());
+        if (disabled.includes(agentType)) {
+          process.stdout.write(JSON.stringify({
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              permissionDecision: 'deny',
+              permissionDecisionReason: 'Agent "' + agentType + '" is disabled in Claude Skills Manager. Enable it in the VS Code sidebar to use it.'
+            }
+          }));
+          process.exit(0);
+          return;
+        }
+      } catch {}
+    }
+    process.exit(0);
+  } catch { process.exit(0); }
+});
+`;
+
+function ensureHookInstalled() {
+  const home = os.homedir();
+  const claudeDir = path.join(home, '.claude');
+  const scriptPath = path.join(claudeDir, 'skills-manager-block.js');
+  const settingsPath = path.join(claudeDir, 'settings.local.json');
+
+  try {
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(scriptPath, HOOK_SCRIPT_CONTENT, 'utf-8');
+
+    let settings = {};
+    try { if (fs.existsSync(settingsPath)) settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')); } catch {}
+
+    const hookCommand = `node ${scriptPath}`;
+    const existing = (settings.hooks?.PreToolUse ?? []);
+    const alreadyRegistered = existing.some(entry =>
+      entry.hooks?.some(h => h.type === 'command' && h.command === hookCommand)
+    );
+    if (alreadyRegistered) return;
+
+    settings.hooks = settings.hooks ?? {};
+    settings.hooks.PreToolUse = settings.hooks.PreToolUse ?? [];
+    settings.hooks.PreToolUse.push({
+      matcher: 'Agent',
+      hooks: [{ type: 'command', command: hookCommand, timeout: 5 }]
+    });
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+  } catch {}
+}
+
 function activate(context) {
+  ensureHookInstalled();
   const provider = new SkillsProvider();
   const treeView = vscode.window.createTreeView('claude-skills-tree', { treeDataProvider: provider, showCollapseAll: true });
 
