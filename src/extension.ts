@@ -14,6 +14,10 @@ interface AgentCall {
   name: string;
   description: string;
   timestamp: number;
+  toolType: 'agent' | 'skill';
+  toolUseId?: string;
+  durationMs?: number;
+  inputTokens?: number;
 }
 
 interface SkillData {
@@ -89,13 +93,32 @@ function readSkillMeta(filePath: string, fallbackName: string): { name: string; 
 // ---------------------------------------------------------------------------
 
 function findLatestTranscript(cwd: string): string | null {
-  // Claude Code stores transcripts at ~/.claude/projects/<hash>/<session>.jsonl
-  // The hash is derived from the project path.
+  // Claude Code stores transcripts at ~/.claude/projects/<encoded-path>/<session>.jsonl
+  // The directory name is the cwd with every '/' replaced by '-'.
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
   if (!fs.existsSync(projectsDir)) { return null; }
 
+  // Try the project-specific directory first
+  const projectDirName = cwd.replace(/\//g, '-');
+  const projectDir = path.join(projectsDir, projectDirName);
+
   let latestFile: string | null = null;
   let latestTime = 0;
+
+  if (fs.existsSync(projectDir)) {
+    try {
+      const files = fs.readdirSync(projectDir, { withFileTypes: true })
+        .filter(e => e.isFile() && e.name.endsWith('.jsonl'));
+      for (const file of files) {
+        const filePath = path.join(projectDir, file.name);
+        const stat = fs.statSync(filePath);
+        if (stat.mtimeMs > latestTime) { latestTime = stat.mtimeMs; latestFile = filePath; }
+      }
+    } catch { /* skip */ }
+    if (latestFile) { return latestFile; }
+  }
+
+  // Fall back to global search if project dir not found
 
   try {
     const projectDirs = fs.readdirSync(projectsDir, { withFileTypes: true })
@@ -128,44 +151,80 @@ function relativeTime(ms: number): string {
   return `${Math.floor(diff / 3_600_000)}h ago`;
 }
 
-function parseAgentCallsFromTranscript(transcriptPath: string): AgentCall[] {
-  const calls: AgentCall[] = [];
-  try {
-    const text = fs.readFileSync(transcriptPath, 'utf-8');
-    const lines = text.trim().split('\n').filter(Boolean);
+function formatDuration(ms: number): string {
+  if (ms < 1_000) { return `${ms}ms`; }
+  if (ms < 60_000) { return `${Math.round(ms / 1_000)}s`; }
+  const min = Math.floor(ms / 60_000);
+  const sec = Math.round((ms % 60_000) / 1_000);
+  return sec > 0 ? `${min}m ${sec}s` : `${min}m`;
+}
 
-    // Read last 200 lines for recent activity
-    for (const line of lines.slice(-200)) {
+function formatTokens(n: number): string {
+  if (n >= 1_000) { return `${(n / 1_000).toFixed(1)}k tok`; }
+  return `${n} tok`;
+}
+
+function parseAgentCallsFromTranscript(transcriptPath: string): AgentCall[] {
+  const byId = new Map<string, AgentCall>();
+  const ordered: AgentCall[] = [];
+
+  try {
+    const lines = fs.readFileSync(transcriptPath, 'utf-8').trim().split('\n').filter(Boolean);
+
+    for (const line of lines.slice(-400)) {
       try {
         const obj = JSON.parse(line) as Record<string, unknown>;
-
-        // Format 1: { type: "assistant", message: { content: [...] }, timestamp }
-        const msgContent = (obj['message'] as Record<string, unknown> | undefined)?.['content'];
         const timestamp = typeof obj['timestamp'] === 'string'
           ? new Date(obj['timestamp']).getTime()
           : (typeof obj['ts'] === 'number' ? (obj['ts'] as number) * 1000 : Date.now());
 
-        const contentArr = Array.isArray(msgContent) ? msgContent
+        const msgObj = obj['message'] as Record<string, unknown> | undefined;
+        const usage = (msgObj?.['usage'] ?? obj['usage']) as Record<string, number> | undefined;
+        const totalTokens = (usage?.['input_tokens'] ?? 0) + (usage?.['output_tokens'] ?? 0);
+
+        const contentArr: unknown[] = Array.isArray(msgObj?.['content']) ? msgObj!['content'] as unknown[]
           : Array.isArray(obj['content']) ? obj['content'] as unknown[]
           : [];
 
         for (const block of contentArr) {
+          if (!block || typeof block !== 'object') { continue; }
           const b = block as Record<string, unknown>;
-          if (b['type'] === 'tool_use' && b['name'] === 'Agent') {
+
+          if (b['type'] === 'tool_use') {
+            const toolName = b['name'] as string;
             const input = (b['input'] as Record<string, unknown>) ?? {};
-            const agentType = (input['subagentType'] as string | undefined) ?? '';
-            const description = (input['description'] as string | undefined) ?? '';
-            const name = agentType || description.slice(0, 40) || 'unknown agent';
-            calls.push({ name, description, timestamp });
+            const id = b['id'] as string | undefined;
+
+            if (toolName === 'Agent') {
+              const agentType = (input['subagentType'] as string | undefined) ?? '';
+              const description = (input['description'] as string | undefined) ?? '';
+              const name = (agentType || description.slice(0, 40)) || 'unknown agent';
+              const call: AgentCall = { name, description, timestamp, toolType: 'agent', toolUseId: id, inputTokens: totalTokens || undefined };
+              if (id) { byId.set(id, call); }
+              ordered.push(call);
+            } else if (toolName === 'Skill') {
+              const name = (input['skill'] as string | undefined) ?? 'unknown skill';
+              const description = (input['args'] as string | undefined) ?? '';
+              const call: AgentCall = { name, description, timestamp, toolType: 'skill', toolUseId: id, inputTokens: totalTokens || undefined };
+              if (id) { byId.set(id, call); }
+              ordered.push(call);
+            }
+          }
+
+          if (b['type'] === 'tool_result') {
+            const refId = b['tool_use_id'] as string | undefined;
+            if (refId) {
+              const pending = byId.get(refId);
+              if (pending) { pending.durationMs = timestamp - pending.timestamp; }
+            }
           }
         }
       } catch { /* skip malformed lines */ }
     }
   } catch { /* file unreadable */ }
 
-  // Most recent first, deduplicated by name (keep latest occurrence)
   const seen = new Set<string>();
-  return calls.reverse().filter(c => {
+  return ordered.reverse().filter(c => {
     if (seen.has(c.name)) { return false; }
     seen.add(c.name);
     return true;
@@ -286,13 +345,24 @@ class SkillsTreeItem extends vscode.TreeItem {
       const { call, filePath } = data;
       this.label = call.name;
       this.contextValue = filePath ? 'activity-openable' : 'activity';
-      this.description = relativeTime(call.timestamp);
+
+      const parts: string[] = [];
+      if (call.durationMs != null) { parts.push(formatDuration(call.durationMs)); }
+      if (call.inputTokens) { parts.push(formatTokens(call.inputTokens)); }
+      parts.push(relativeTime(call.timestamp));
+      this.description = parts.join(' · ');
+
+      const icon = call.toolType === 'skill' ? '$(book)' : '$(arrow-right)';
       this.tooltip = new vscode.MarkdownString(
-        `**${call.name}**\n\n` +
+        `**${call.name}** *(${call.toolType})*\n\n` +
+        (call.durationMs != null ? `Duration: ${formatDuration(call.durationMs)}\n\n` : '') +
+        (call.inputTokens ? `Tokens: ${formatTokens(call.inputTokens)}\n\n` : '') +
         (call.description ? `${call.description}\n\n` : '') +
         (filePath ? `*${filePath}*` : '*file not found in scanned skills*')
       );
-      this.iconPath = new vscode.ThemeIcon('arrow-right', new vscode.ThemeColor('terminal.ansiCyan'));
+      this.iconPath = call.toolType === 'skill'
+        ? new vscode.ThemeIcon('book', new vscode.ThemeColor('terminal.ansiGreen'))
+        : new vscode.ThemeIcon('arrow-right', new vscode.ThemeColor('terminal.ansiCyan'));
       if (filePath) {
         this.command = { command: 'claude-skills.openFile', title: 'Open File', arguments: [filePath] };
       }
@@ -560,7 +630,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand('claude-skills.disableSkill', async (item: SkillsTreeItem) => {
       const data = item?.data;
-      if (!data || 'isCategory' in data || 'isConfigFile' in data || data.isDisabled) { return; }
+      if (!data || 'isCategory' in data || 'isConfigFile' in data || 'isActivity' in data || data.isDisabled) { return; }
 
       const answer = await vscode.window.showWarningMessage(
         `Disable "${data.name}"? The file will be renamed with a .disabled suffix so Claude Code won't load it.`,
