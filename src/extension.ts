@@ -196,7 +196,7 @@ function parseAgentCallsFromTranscript(transcriptPath: string): AgentCall[] {
             const id = b['id'] as string | undefined;
 
             if (toolName === 'Agent') {
-              const agentType = (input['subagentType'] as string | undefined) ?? '';
+              const agentType = ((input['subagentType'] ?? input['subagent_type']) as string | undefined) ?? '';
               const description = (input['description'] as string | undefined) ?? '';
               const name = (agentType || description.slice(0, 40)) || 'unknown agent';
               const call: AgentCall = { name, description, timestamp, toolType: 'agent', toolUseId: id, inputTokens: totalTokens || undefined };
